@@ -262,7 +262,7 @@ function StripeConnectCard({ apiKey }: { apiKey: string }) {
                 HOW PAYOUTS WORK
               </span>
               <p className="text-xs text-[var(--ak-ink3)] leading-relaxed">
-                Payouts are processed monthly once you reach the $50 minimum withdrawal threshold. Earnings are weighted by call volume and agent quality. See provider terms for the full fee schedule.
+                Payouts are processed monthly once you reach the A$50 minimum withdrawal threshold. Earnings are a share of subscription revenue, weighted by call volume and agent rating, less a 5% reserve held against disputes. See provider terms for the full fee schedule.
               </p>
             </div>
           </div>
@@ -729,7 +729,7 @@ export function ProviderDashboardClient() {
                   NO PAYOUTS YET
                 </p>
                 <p className="text-xs text-[var(--ak-ink3)] leading-relaxed">
-                  Payouts appear here once your earnings reach the $50 minimum threshold
+                  Payouts appear here once your earnings reach the A$50 minimum threshold
                   and the monthly runner processes the period. Successful API calls to your
                   agents contribute to the next payout cycle.
                 </p>

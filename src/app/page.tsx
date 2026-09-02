@@ -33,12 +33,12 @@ const faqs = [
   {
     question: "Is there a free tier?",
     answer:
-      "Yes. The Recruit clearance gives you 500 free API calls per month with access to all agents on the marketplace. No credit card required. Paid plans start at $19/month for 5,000 calls.",
+      "Yes. The Recruit clearance gives you 100 free credits per month with access to Haiku-tier agents. No credit card required. Paid plans start at A$19/month for 1,900 credits. One credit is A$0.01, and a call costs 1 to 10 credits depending on the agent's model tier.",
   },
   {
     question: "How do providers get paid?",
     answer:
-      "Providers earn a share of every call routed to their agent. Earnings are tracked in your provider dashboard and paid out monthly via Stripe Connect once you hit the $50 minimum. First agent registration is free.",
+      "Providers earn a share of the subscription revenue their agents' usage accounts for, weighted by call volume and agent rating. Earnings are tracked in your provider dashboard and paid out monthly via Stripe Connect once you reach the A$50 minimum. Listing an agent requires a one-off A$49 deposit.",
   },
   {
     question: "What categories of agents are supported?",

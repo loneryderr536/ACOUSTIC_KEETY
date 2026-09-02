@@ -135,6 +135,199 @@ async function upsertPayoutRow(args: {
   });
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Shared period computation                                          */
+/* ------------------------------------------------------------------ */
+
+export type PeriodSplit = {
+  ok: boolean;
+  /** Non-fatal warnings worth surfacing to whoever ran this. */
+  notes: string[];
+  /** Set when ok is false — the reason nothing can be distributed. */
+  error?: string;
+  totalRevenueCents: number;
+  currency: string;
+  nativeSharePct: number;
+  platformRetainedFromNativeCents: number;
+  providerPoolCents: number;
+  platformShareCents: number;
+  reserveHeldCents: number;
+  distributableCents: number;
+  weightedByProvider: Record<string, number>;
+  callsByProvider: Record<string, number>;
+  thirdPartyWeightedTotal: number;
+  nativeWeightedTotal: number;
+  nativeCallCount: number;
+};
+
+const EMPTY_SPLIT: Omit<PeriodSplit, 'ok' | 'error' | 'notes'> = {
+  totalRevenueCents: 0,
+  currency: PAYOUT_CURRENCY,
+  nativeSharePct: 0,
+  platformRetainedFromNativeCents: 0,
+  providerPoolCents: 0,
+  platformShareCents: 0,
+  reserveHeldCents: 0,
+  distributableCents: 0,
+  weightedByProvider: {},
+  callsByProvider: {},
+  thirdPartyWeightedTotal: 0,
+  nativeWeightedTotal: 0,
+  nativeCallCount: 0,
+};
+
+/**
+ * Everything the payout maths needs for one period, with no side effects and
+ * no Stripe calls.
+ *
+ * Extracted so the payout run and the provider dashboard compute a provider's
+ * earnings from *the same code*. They used to disagree: the dashboard showed
+ * the rolling engine's number while the pool engine paid a different one, which
+ * on real data was a 26x gap. A provider comparing their dashboard to their
+ * bank statement would have found that before we did.
+ */
+export async function computePeriodSplit(periodKey: string): Promise<PeriodSplit> {
+  const notes: string[] = [];
+
+  // Revenue pooled for this period.
+  const revenue = await prisma.revenuePeriod.findUnique({ where: { periodKey } });
+  if (!revenue) {
+    return { ok: false, notes, error: `No RevenuePeriod row for "${periodKey}" — nothing to distribute.`, ...EMPTY_SPLIT };
+  }
+  const totalRevenueCents = revenue.subscriptionCents + revenue.overageCents;
+
+  // Invoices billed in another currency were recorded but excluded from the
+  // pool (see the currency guard in revenue.ts). A period quietly missing
+  // revenue would otherwise underpay every provider in it.
+  const unpooled = await prisma.revenueInvoice.findMany({
+    where: { periodKey, pooled: false },
+    select: { id: true, currency: true },
+  });
+  if (unpooled.length > 0) {
+    const currencies = [...new Set(unpooled.map((i) => i.currency.toUpperCase()))].join(', ');
+    notes.push(
+      `${unpooled.length} invoice(s) in this period were billed in ${currencies} and are NOT in the pool ` +
+        `(settlement is ${PAYOUT_CURRENCY.toUpperCase()}). Providers are underpaid until this is reconciled.`,
+    );
+  }
+
+  // Usage for the period, with enough agent detail to weight it.
+  const usageEvents = await prisma.apiCall.findMany({
+    where: { periodKey, status: 'success' },
+    include: { agent: { select: { id: true, providerId: true, native: true, status: true, rating: true, reviewCount: true } } },
+  });
+  if (usageEvents.length === 0) {
+    return { ok: false, notes, error: `No usage events for "${periodKey}" — nothing to distribute.`, ...EMPTY_SPLIT };
+  }
+
+  let nativeWeightedTotal = 0;
+  let allWeightedTotal = 0;
+  let nativeCallCount = 0;
+
+  for (const event of usageEvents) {
+    const weighted = event.creditsConsumed * qualityMultiplier(event.agent);
+    allWeightedTotal += weighted;
+    if (event.agent.native) {
+      nativeWeightedTotal += weighted;
+      nativeCallCount++;
+    }
+  }
+
+  if (allWeightedTotal === 0) {
+    return {
+      ok: false, notes,
+      error: 'All usage this period was suspended/below-rating agents — nothing to distribute.',
+      ...EMPTY_SPLIT,
+    };
+  }
+
+  // Native's share stays with the platform, 100%, BEFORE the pool is sized.
+  // The order matters — see payout-split-spec.md.
+  const nativeSharePct = nativeWeightedTotal / allWeightedTotal;
+  const platformRetainedFromNativeCents = Math.round(totalRevenueCents * nativeSharePct);
+
+  const thirdPartySubscriptionCents = Math.round(revenue.subscriptionCents * (1 - nativeSharePct));
+  const thirdPartyOverageCents = Math.round(revenue.overageCents * (1 - nativeSharePct));
+
+  const providerPoolCents = Math.round(
+    thirdPartySubscriptionCents * SUBSCRIPTION_PROVIDER_SHARE +
+      thirdPartyOverageCents * OVERAGE_PROVIDER_SHARE,
+  );
+  const platformShareCents = totalRevenueCents - providerPoolCents - platformRetainedFromNativeCents;
+
+  const reserveHeldCents = Math.round(providerPoolCents * RESERVE_PCT);
+  const distributableCents = providerPoolCents - reserveHeldCents;
+
+  // Roll up to provider level, excluding native agents entirely.
+  const weightedByProvider: Record<string, number> = {};
+  const callsByProvider: Record<string, number> = {};
+
+  for (const event of usageEvents) {
+    if (event.agent.native) continue;
+    const pid = event.agent.providerId;
+    weightedByProvider[pid] = (weightedByProvider[pid] || 0) + event.creditsConsumed * qualityMultiplier(event.agent);
+    callsByProvider[pid] = (callsByProvider[pid] || 0) + 1;
+  }
+
+  const thirdPartyWeightedTotal = Object.values(weightedByProvider).reduce((sum, w) => sum + w, 0);
+  if (thirdPartyWeightedTotal === 0) {
+    notes.push('No third-party usage this period — the whole pool stays with the platform.');
+  }
+
+  return {
+    ok: true,
+    notes,
+    totalRevenueCents,
+    currency: revenue.currency,
+    nativeSharePct,
+    platformRetainedFromNativeCents,
+    providerPoolCents,
+    platformShareCents,
+    reserveHeldCents,
+    distributableCents,
+    weightedByProvider,
+    callsByProvider,
+    thirdPartyWeightedTotal,
+    nativeWeightedTotal,
+    nativeCallCount,
+  };
+}
+
+/**
+ * What one provider would be allocated for a period, from the same maths the
+ * payout run uses. Read-only, no Stripe call — safe to call from a dashboard.
+ */
+export async function estimateProviderShare(providerId: string, periodKey: string) {
+  const split = await computePeriodSplit(periodKey);
+  if (!split.ok) {
+    return {
+      periodKey, grossCents: 0, shareCents: 0, weighted: 0, sharePct: 0, callCount: 0,
+      currency: PAYOUT_CURRENCY, belowMinimum: false, reason: split.error,
+    };
+  }
+
+  const weighted = split.weightedByProvider[providerId] ?? 0;
+  const sharePct = split.thirdPartyWeightedTotal > 0 ? weighted / split.thirdPartyWeightedTotal : 0;
+  // Gross is this provider's slice of the pool before the reserve is withheld;
+  // shareCents is what would actually transfer. Showing both makes the reserve
+  // visible to the provider rather than an unexplained shortfall.
+  const grossCents = Math.round(sharePct * split.providerPoolCents);
+  const shareCents = Math.round(sharePct * split.distributableCents);
+
+  return {
+    periodKey,
+    grossCents,
+    shareCents,
+    weighted,
+    sharePct,
+    callCount: split.callsByProvider[providerId] ?? 0,
+    currency: split.currency,
+    belowMinimum: shareCents > 0 && shareCents < MIN_PAYOUT_THRESHOLD_CENTS,
+    reason: undefined as string | undefined,
+  };
+}
+
 /**
  * `dryRun` defaults to TRUE. This engine and the rolling engine in payouts.ts
  * both write to the same `Payout` table, so running both against one period
@@ -189,77 +382,32 @@ export async function runMonthlyPayout(
     return summary;
   }
 
-  // ── Stage 1: this period's revenue split ────────────────────────────────
-  const revenue = await prisma.revenuePeriod.findUnique({ where: { periodKey } });
-  if (!revenue) {
-    summary.errors.push(`No RevenuePeriod row for "${periodKey}" — nothing to distribute.`);
+  // ── Stages 1-5: pooled revenue, weighted usage, splits ──────────────────
+  // All of it lives in computePeriodSplit so the provider dashboard computes a
+  // provider's earnings from exactly this code rather than its own copy.
+  const split = await computePeriodSplit(periodKey);
+  summary.errors.push(...split.notes);
+  if (!split.ok) {
+    summary.errors.push(split.error ?? 'Period could not be computed.');
     return summary;
   }
-  const totalRevenueCents = revenue.subscriptionCents + revenue.overageCents;
+
+  const {
+    totalRevenueCents, nativeSharePct, platformRetainedFromNativeCents,
+    providerPoolCents, platformShareCents, reserveHeldCents, distributableCents,
+    weightedByProvider, callsByProvider, thirdPartyWeightedTotal,
+    nativeWeightedTotal, nativeCallCount,
+  } = split;
+
   summary.totalRevenueCents = totalRevenueCents;
-
-  // Invoices billed in another currency were recorded but excluded from the
-  // pool (see the currency guard in revenue.ts). Say so — a period quietly
-  // missing revenue would otherwise underpay every provider in it.
-  const unpooled = await prisma.revenueInvoice.findMany({
-    where: { periodKey, pooled: false },
-    select: { id: true, currency: true },
-  });
-  if (unpooled.length > 0) {
-    const currencies = [...new Set(unpooled.map((i) => i.currency.toUpperCase()))].join(', ');
-    summary.errors.push(
-      `${unpooled.length} invoice(s) in this period were billed in ${currencies} and are NOT in the pool ` +
-        `(settlement is ${PAYOUT_CURRENCY.toUpperCase()}). Providers are underpaid until this is reconciled.`,
-    );
-  }
-
-  // ── Stage 2: this period's usage, with agent info attached ──────────────
-  const usageEvents = await prisma.apiCall.findMany({
-    where: { periodKey, status: 'success' },
-    include: { agent: { select: { id: true, providerId: true, native: true, status: true, rating: true, reviewCount: true } } },
-  });
-
-  if (usageEvents.length === 0) {
-    summary.errors.push(`No usage events for "${periodKey}" — nothing to distribute.`);
-    return summary;
-  }
-
-  let nativeWeightedTotal = 0;
-  let allWeightedTotal = 0;
-
-  for (const event of usageEvents) {
-    const weighted = event.creditsConsumed * qualityMultiplier(event.agent);
-    allWeightedTotal += weighted;
-    if (event.agent.native) nativeWeightedTotal += weighted;
-  }
-
-  if (allWeightedTotal === 0) {
-    summary.errors.push('All usage this period was suspended/below-rating agents — nothing to distribute.');
-    return summary;
-  }
-
-  // ── Stage 3: native's share stays with the platform, 100%, before the
-  //    pool is even sized. The order matters — see payout-split-spec.md.
-  const nativeSharePct = nativeWeightedTotal / allWeightedTotal;
-  summary.platformRetainedFromNativeCents = Math.round(totalRevenueCents * nativeSharePct);
-
-  const thirdPartySubscriptionCents = Math.round(revenue.subscriptionCents * (1 - nativeSharePct));
-  const thirdPartyOverageCents = Math.round(revenue.overageCents * (1 - nativeSharePct));
-
-  const providerPoolCents = Math.round(
-    thirdPartySubscriptionCents * SUBSCRIPTION_PROVIDER_SHARE +
-      thirdPartyOverageCents * OVERAGE_PROVIDER_SHARE,
-  );
+  summary.platformRetainedFromNativeCents = platformRetainedFromNativeCents;
   summary.providerPoolCents = providerPoolCents;
-  summary.platformShareCents =
-    totalRevenueCents - providerPoolCents - summary.platformRetainedFromNativeCents;
-
-  // ── Stage 4: reserve check ──────────────────────────────────────────────
-  const reserveCents = Math.round(providerPoolCents * RESERVE_PCT);
-  const distributableCents = providerPoolCents - reserveCents;
-  summary.reserveHeldCents = reserveCents;
+  summary.platformShareCents = platformShareCents;
+  summary.reserveHeldCents = reserveHeldCents;
   summary.distributableCents = distributableCents;
 
+  // Balance check stays here — it needs Stripe, and computePeriodSplit is
+  // deliberately side-effect free so a dashboard can call it.
   const balance = await stripe.balance.retrieve();
   const availableCents = balance.available.reduce((sum, b) => sum + b.amount, 0);
   if (availableCents < providerPoolCents) {
@@ -267,22 +415,6 @@ export async function runMonthlyPayout(
       `Available Stripe balance (${availableCents}c) is less than the computed pool (${providerPoolCents}c) — aborting.`,
     );
     return summary;
-  }
-
-  // ── Stage 5: roll up to provider level, excluding native agents ─────────
-  const weightedByProvider: Record<string, number> = {};
-  const callsByProvider: Record<string, number> = {};
-
-  for (const event of usageEvents) {
-    if (event.agent.native) continue;
-    const pid = event.agent.providerId;
-    weightedByProvider[pid] = (weightedByProvider[pid] || 0) + event.creditsConsumed * qualityMultiplier(event.agent);
-    callsByProvider[pid] = (callsByProvider[pid] || 0) + 1;
-  }
-
-  const thirdPartyWeightedTotal = Object.values(weightedByProvider).reduce((s, w) => s + w, 0);
-  if (thirdPartyWeightedTotal === 0) {
-    summary.errors.push('No third-party usage this period — the whole pool stays with the platform.');
   }
 
   // ── Stage 6: pay each third-party provider ──────────────────────────────
@@ -371,7 +503,7 @@ export async function runMonthlyPayout(
         weightedCalls: nativeWeightedTotal,
         sharePct: nativeSharePct,
         grossAmount: summary.platformRetainedFromNativeCents,
-        callCount: usageEvents.filter((e) => e.agent.native).length,
+        callCount: nativeCallCount,
         status: 'retained_native',
       });
     }

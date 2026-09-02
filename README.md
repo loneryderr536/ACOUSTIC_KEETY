@@ -122,7 +122,7 @@ src/
 
 - **Input scanning**: All `/api/v1/run` payloads scanned for prompt injection patterns before proxying to agents
 - **Response sanitization**: Agent responses stripped of XSS vectors and prototype pollution keys
-- **Rate limiting**: Per-subscriber call limits enforced (Explorer: 500/mo, Builder: 25K/mo, Scale: 200K/mo)
+- **Rate limiting**: Per-subscriber credit limits enforced — Recruit 100, Field Agent 1,900, Double-0 7,900, Shadow 24,900 credits/month, plus daily allowances and burst caps (see `src/lib/plans.ts`)
 - **Password hashing**: bcrypt with 12 rounds
 
 ## Seed Data

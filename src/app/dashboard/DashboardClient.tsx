@@ -681,7 +681,7 @@ export function DashboardClient() {
                 icon={Zap}
                 label="Credit Balance"
                 value={stats.callsBalance.toLocaleString()}
-                sub="Credits available (1 credit = $0.01)"
+                sub="Credits available (1 credit = A$0.01)"
               >
                 {/* Balance bar: balance relative to daily ceiling */}
                 <div className="mt-4 h-1 w-full overflow-hidden" style={{ background: "var(--ak-paper-deep)" }}>

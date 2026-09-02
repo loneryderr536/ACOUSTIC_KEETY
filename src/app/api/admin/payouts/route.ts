@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  let body: { dryRun?: boolean; periodEnd?: string } = {};
+  let body: { dryRun?: boolean; periodEnd?: string; force?: boolean } = {};
   try {
     body = await request.json();
   } catch {
@@ -56,10 +56,38 @@ export async function POST(request: NextRequest) {
     });
   }
 
+  // ── RETIRED AS A PAYER (2026-09-02) ─────────────────────────────────────
+  //
+  // The monthly revenue-pool engine is now the one that moves money:
+  //   POST /api/admin/payout-run  { "periodKey": "2026-09", "confirm": true }
+  //
+  // Both engines write to the same `Payout` table, so running both against one
+  // period pays every provider twice. And they disagree by a lot: measured on
+  // real data, this one judged a provider to have earned $1.80 where the pool
+  // engine said $47.46 — an effective platform take of 97.7% against a
+  // published 65/35 split.
+  //
+  // The aggregation is deliberately kept, not deleted: `previewAllPayouts`
+  // above still works, and comparing the two engines on live data is worth
+  // being able to do. Only the path that creates Stripe Transfers is closed.
+  if (!body.force) {
+    return NextResponse.json(
+      {
+        error: 'This engine no longer sends payouts.',
+        use: 'POST /api/admin/payout-run with { "periodKey": "YYYY-MM", "confirm": true }',
+        why:
+          'The monthly revenue-pool engine is the payer. Running both against the same period would ' +
+          'pay providers twice. Pass {"dryRun":true} here for a comparison preview, which still works.',
+      },
+      { status: 409 },
+    );
+  }
+
   try {
     const result = await runAllPayouts(periodEnd);
     return NextResponse.json({
       mode: 'live',
+      warning: 'Forced run of the RETIRED rolling engine. Check for duplicate Payout rows against payout-run.',
       ...result,
     });
   } catch (err) {
