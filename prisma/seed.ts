@@ -37,6 +37,58 @@ async function main() {
     },
   });
 
+  // The marketplace's own provider identity. Native agents hang off this row,
+  // and PLATFORM_USER_ID (used by the monthly payout run for its
+  // retained_native reporting line) should point at the same one.
+  const platform = await prisma.user.upsert({
+    where: { email: process.env.PLATFORM_PROVIDER_EMAIL || "station@acoustickitty.ai" },
+    update: { role: "provider" },
+    create: {
+      email: process.env.PLATFORM_PROVIDER_EMAIL || "station@acoustickitty.ai",
+      name: "Acoustic Kitty",
+      role: "provider",
+      onboardingComplete: true,
+      chargesEnabled: true,
+      payoutsEnabled: true,
+    },
+  });
+
+  // A deliberately throwaway native agent, for walking the flow end to end:
+  // it should show up under STATION ISSUE on the landing page, carry the
+  // native flag through /api/agents?native=true, and have its usage retained
+  // by the platform rather than entering the provider payout pool.
+  await prisma.agent.upsert({
+    where: { slug: "gimmick" },
+    update: { native: true, providerId: platform.id, status: "active" },
+    create: {
+      slug: "gimmick",
+      name: "Gimmick",
+      description:
+        "Station-issue test operative. Echoes what you send it with a bit of theatre. Exists so the in-house agent path can be walked end to end without touching a real provider's listing.",
+      shortDesc: "Station-issue test operative. Echoes what you send it, with theatre.",
+      category: "other",
+      tags: ["Test", "In-house", "Echo"],
+      providerId: platform.id,
+      native: true,
+      endpointUrl: "https://demo.acoustickitty.ai/mock/gimmick",
+      connectorType: "api",
+      authType: "none",
+      pricingModel: "platform",
+      pricePerCall: 20,
+      modelTier: "haiku",
+      status: "active",
+      currentScore: 88.0,
+      latencyP50: 95,
+      latencyP95: 170,
+      uptime: 99.99,
+      totalCalls: 0,
+      rating: 4.5,
+      reviewCount: 0,
+      currentRank: 9,
+      trendDelta: 0,
+    },
+  });
+
   // Seed agents
   const agents = [
     {
@@ -164,6 +216,10 @@ async function main() {
   console.log("Seeded successfully!");
   console.log("Provider API key:", provider.apiKey);
   console.log("Subscriber API key:", subscriber.apiKey);
+  console.log("");
+  console.log("Platform (native agent owner) user id:", platform.id);
+  console.log("  -> put this in .env as PLATFORM_USER_ID=" + platform.id);
+  console.log("Native agent seeded: gimmick");
 }
 
 main()

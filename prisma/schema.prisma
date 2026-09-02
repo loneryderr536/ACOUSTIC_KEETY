@@ -20,6 +20,15 @@ model User {
   stripeAccountId    String?
   googleId           String?   @unique
   onboardingComplete Boolean   @default(false)
+  // Connect capability flags, mirrored from Stripe by the connect webhook and
+  // by GET /api/stripe/connect. The monthly payout engine gates transfers on
+  // these two — onboardingComplete alone is not enough, an account can have
+  // submitted details and still not be payout-capable.
+  chargesEnabled     Boolean   @default(false)
+  payoutsEnabled     Boolean   @default(false)
+  // One $49 listing deposit per provider. Set by the deposit branch of
+  // checkout.session.completed.
+  depositPaid        Boolean   @default(false)
   callsBalance       Int       @default(500)
   dailyAllowance     Int       @default(17)
   dailyCeiling       Int       @default(34)
@@ -66,6 +75,9 @@ model Agent {
   hasAgentCard   Boolean  @default(false)
   skillsData     Json?
   modelTier      String   @default("unknown") // "haiku" | "standard" | "premium" | "unknown"
+  // Platform-owned vs third-party. Native agents' share of revenue is retained
+  // by the platform in full and never enters the provider pool.
+  native         Boolean  @default(false)
   depositPaymentIntentId String?
   depositStatus  String?
   depositPaidAt  DateTime?
@@ -82,6 +94,14 @@ model Agent {
   rating       Float?  @default(0)
   reviewCount  Int     @default(0)
 
+  /// Full-text search vector, added by migration 20260413010000_add_search_vector
+  /// as raw SQL and kept up to date by the `agent_search_update` trigger.
+  /// `tsvector` has no native Prisma type, so it must be declared Unsupported —
+  /// otherwise Prisma treats the column as drift and generates a DROP COLUMN for
+  /// it on the next `migrate dev`, which also breaks every INSERT, because the
+  /// trigger still tries to set a field that no longer exists.
+  searchVector Unsupported("tsvector")?
+
   benchmarks   Benchmark[]
   apiCalls     ApiCall[]
   healthChecks HealthCheck[]
@@ -91,6 +111,8 @@ model Agent {
 
   @@index([category, status])
   @@index([status, currentScore(sort: Desc)])
+  /// Declared so Prisma stops dropping the GIN index the search migration created.
+  @@index([searchVector], type: Gin)
 }
 
 model Benchmark {
@@ -131,10 +153,16 @@ model ApiCall {
   // past calls. This is the authoritative field for provider payouts.
   creditsConsumed  Int    @default(0)
   errorMessage     String?
+  // Calendar month (UTC) this call falls in, e.g. "2026-07". Stamped at write
+  // time so the monthly payout job can aggregate a period in one query.
+  // Nullable only so the column could be added to existing rows — always set
+  // on new writes. Backfill with backfillUsagePeriodKeys() in src/stripe/usage.ts.
+  periodKey        String?
   createdAt        DateTime @default(now())
 
   @@index([subscriberId, createdAt(sort: Desc)])
   @@index([agentId, createdAt(sort: Desc)])
+  @@index([periodKey])
 }
 
 model HealthCheck {
@@ -182,14 +210,91 @@ model Payout {
   grossCents          Int
   providerShareCents  Int
   callCount           Int      @default(0)
-  status              String   @default("pending") // "pending" | "paid" | "skipped" | "failed"
+  // Set by the monthly revenue-pool engine; null for rows written by the
+  // rolling per-provider engine, which works off periodStart/periodEnd only.
+  periodKey           String?
+  weightedCalls       Float?
+  sharePct            Float?
+  // "pending" | "paid" | "skipped" | "failed"
+  //   plus, from the monthly engine:
+  // "held_incomplete_onboarding" — computed but the provider is not payout-capable
+  // "retained_native"            — platform's own retained share, reporting only
+  status              String   @default("pending")
   skipReason          String?
   stripeTransferId    String?  @unique
   failureReason       String?
   createdAt           DateTime @default(now())
   paidAt              DateTime?
 
+  // Idempotency for both engines. The monthly engine derives periodEnd from
+  // its periodKey (first instant of the following month), so re-running a
+  // month upserts the same row rather than duplicating it.
   @@unique([providerId, periodEnd])
   @@index([providerId, createdAt(sort: Desc)])
+  @@index([providerId, periodKey])
   @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Added when the standalone Stripe service was merged in. See src/stripe/.
+// ---------------------------------------------------------------------------
+
+/// Dedup table. Stripe redelivers webhooks on retry; without this a
+/// redelivered invoice.paid resets a subscriber's credits twice and
+/// double-counts revenue. The Stripe event id IS the primary key.
+model WebhookEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+
+  @@index([type, processedAt])
+  @@map("webhook_events")
+}
+
+/// Which Stripe invoices have already been folded into a RevenuePeriod.
+///
+/// Exists because Stripe fires BOTH `invoice.paid` and `invoice.payment_succeeded`
+/// for the same invoice. Those are distinct events with distinct ids, so the
+/// WebhookEvent table correctly lets both through — but the revenue handler
+/// INCREMENTS rather than sets, so counting both doubled the payout pool.
+/// Caught in test mode: a $19 subscription produced 3800c instead of 1900c.
+///
+/// The primary key is the Stripe invoice id. The insert and the pool increment
+/// run in one transaction, so a second delivery violates this key, rolls back,
+/// and leaves the pool untouched. Doubles as an audit trail of exactly which
+/// invoices make up a period's pool.
+model RevenueInvoice {
+  id                String   @id
+  periodKey         String
+  /// The currency this invoice was actually billed in, lowercased. Recorded
+  /// because Stripe Adaptive Pricing can charge a customer in their local
+  /// currency, which makes `subscriptionCents` mean something different per row.
+  currency          String   @default("aud")
+  subscriptionCents Int
+  overageCents      Int
+  /// False when the invoice was NOT added to the period pool — currently only
+  /// when its currency doesn't match the settlement currency. The money is real
+  /// and the row is kept for reconciliation; it just can't be summed with the rest.
+  pooled            Boolean  @default(true)
+  recordedAt        DateTime @default(now())
+
+  @@index([periodKey])
+  @@index([periodKey, pooled])
+  @@map("revenue_invoices")
+}
+
+/// Accumulated revenue for one calendar month, split subscription vs overage.
+/// This is the pool runMonthlyPayout distributes. Written by the invoice.paid
+/// handler; nothing tracked this before the merge.
+model RevenuePeriod {
+  periodKey         String   @id
+  /// Every amount in this row is denominated in this currency. A period only
+  /// ever pools one — invoices billed in anything else are recorded against the
+  /// period but excluded, and the payout run reports them.
+  currency          String   @default("aud")
+  subscriptionCents Int      @default(0)
+  overageCents      Int      @default(0)
+  updatedAt         DateTime @updatedAt
+
+  @@map("revenue_periods")
 }

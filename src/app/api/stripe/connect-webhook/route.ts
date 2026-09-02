@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStripe } from '@/lib/stripe';
-import { prisma } from '@/lib/prisma';
+import { getStripe } from '@/stripe/client';
+import { isDuplicateEvent, markEventProcessed } from '@/stripe/events';
+import * as handlers from '@/stripe/handlers';
 
+/**
+ * Connect webhook endpoint (separate signing secret from the platform one).
+ *
+ * Added over the previous version: dedup, and `capability.updated`. The latter
+ * matters — an Express account often flips to payouts-enabled via a capability
+ * event rather than a fresh `account.updated`, and without it the payout
+ * engine keeps seeing a provider as not-onboarded.
+ */
 export async function POST(request: NextRequest) {
   const stripe = getStripe();
   if (!stripe) {
@@ -24,32 +33,28 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
   }
 
+  if (await isDuplicateEvent(event.id)) {
+    return NextResponse.json({ received: true, duplicate: true });
+  }
+
   try {
     switch (event.type) {
-      case 'account.updated': {
-        const account = event.data.object;
-        const accountId = account.id;
-
-        const onboardingComplete = account.details_submitted === true;
-        const readyToReceivePayments = account.charges_enabled && account.payouts_enabled;
-
-        if (onboardingComplete || readyToReceivePayments) {
-          await prisma.user.updateMany({
-            where: { stripeAccountId: accountId },
-            data: { onboardingComplete: true },
-          });
-          console.log(`[stripe-connect] Account ${accountId} onboarding complete`);
-        }
+      case 'account.updated':
+        await handlers.handleAccountUpdated(event.data.object);
         break;
-      }
+
+      case 'capability.updated':
+        await handlers.handleCapabilityUpdated(event.data.object);
+        break;
 
       default:
         console.log(`[stripe-connect] Unhandled event type: ${event.type}`);
     }
   } catch (err) {
-    console.error(`[stripe-connect] Error handling event:`, err);
+    console.error('[stripe-connect] Error handling event:', err);
     return NextResponse.json({ error: 'Webhook handler failed' }, { status: 500 });
   }
 
+  await markEventProcessed(event.id, event.type);
   return NextResponse.json({ received: true });
 }

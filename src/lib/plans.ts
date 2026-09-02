@@ -1,7 +1,11 @@
 /**
  * `callsLimit` / `callsBalance` / `callsUsed` are denominated in CREDITS,
- * not raw calls. 1 credit = $0.01. A Haiku-tier agent call burns 1 credit,
- * Standard = 3, Premium = 10 (see MODEL_TIER_WEIGHTS below).
+ * not raw calls. 1 credit = A$0.01. A Haiku-tier agent call burns 1 credit,
+ * Standard = 2, Premium = 10 (see MODEL_TIER_WEIGHTS below).
+ *
+ * This comment said "Standard = 3" while MODEL_TIER_WEIGHTS said 2, which is
+ * the number that actually runs. docs/CONTEXT.md was corrected 3 -> 2 upstream,
+ * so 2 is intended and this comment was the stale half.
  *
  * Plan dollar price = credit count × $0.01. Subscribers always get
  * credit dollar value equal to their subscription dollars.

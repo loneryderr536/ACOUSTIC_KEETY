@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runAllPayouts } from '@/lib/payouts';
+import { runAllPayouts, previewAllPayouts } from '@/lib/payouts';
 
 /**
  * POST /api/admin/payouts
@@ -45,12 +45,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // A real preview: same aggregation and same thresholds as the live run,
+  // but nothing written and Stripe never called. The previous version returned
+  // only a sentence, which answered none of the questions you'd dry-run for.
   if (body.dryRun) {
+    const preview = await previewAllPayouts(periodEnd);
     return NextResponse.json({
-      mode: 'dry-run',
-      periodEnd,
-      message:
-        'Dry-run mode — no Stripe Transfers executed, no Payout rows written. Call without dryRun:true to actually run.',
+      ...preview,
+      message: 'Dry run — no Stripe Transfers executed, no Payout rows written. Omit dryRun to run for real.',
     });
   }
 

@@ -36,7 +36,12 @@ export function Breadcrumbs({ items }: { items: BreadcrumbItem[] }) {
         {items.map((item, index) => {
           const isLast = index === items.length - 1;
           return (
-            <span key={item.href} className="flex items-center gap-1.5">
+            // Keyed by position, not href. A breadcrumb trail can legitimately
+            // repeat the same href (the agent detail page passes "/" twice —
+            // once as Home, once as the agents listing), and href-as-key made
+            // React collapse those into one entry and log a duplicate-key error.
+            // Order is what gives a breadcrumb its identity, so index belongs here.
+            <span key={`${index}-${item.href}`} className="flex items-center gap-1.5">
               {index > 0 && (
                 <ChevronRight size={11} style={{ color: "var(--ak-rule)" }} />
               )}

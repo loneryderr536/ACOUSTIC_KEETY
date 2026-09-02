@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStripe } from '@/lib/stripe';
 import { resolveUser } from '@/lib/auth';
+import { getStripe } from '@/stripe/client';
+import { createPortalSession } from '@/stripe/checkout';
+import { appUrl } from '@/stripe/connect';
 
 export async function POST(request: NextRequest) {
-  const stripe = getStripe();
-  if (!stripe) {
-    return NextResponse.json(
-      { error: 'Billing portal is not yet enabled.' },
-      { status: 503 },
-    );
+  if (!getStripe()) {
+    return NextResponse.json({ error: 'Billing portal is not yet enabled.' }, { status: 503 });
   }
 
   const user = await resolveUser(request.headers.get('authorization'));
@@ -23,16 +21,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL
-    || (railwayDomain ? `https://${railwayDomain}` : null)
-    || request.headers.get('origin')
-    || 'http://localhost:3000';
-
-  const session = await stripe.billingPortal.sessions.create({
-    customer: user.stripeCustomerId,
-    return_url: `${appUrl}/dashboard`,
-  });
-
-  return NextResponse.json({ url: session.url });
+  const url = await createPortalSession(user.stripeCustomerId, appUrl(request.headers.get('origin')));
+  return NextResponse.json({ url });
 }

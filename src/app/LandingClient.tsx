@@ -30,6 +30,7 @@ interface AgentSerialized {
   trendDelta: number; verified: boolean; tags: string[]; uptime: number;
   successRate: number; avgTokens: number; connectors: string[];
   pricingModel: string; pricePerCall: number; modelTier: string;
+  native: boolean;
   docsUrl?: string; apiUrl: string;
 }
 
@@ -75,12 +76,16 @@ function DossierCard({ agent }: { agent: AgentSerialized }) {
   return (
     <Link href={`/agents/${agent.slug}`} className="block group" style={paperBg}>
       <div className="p-[18px_20px_20px] border border-[var(--ak-rule)] relative shadow-[0_1px_0_rgba(0,0,0,0.04)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] transition-shadow">
-        {/* stamp */}
-        {agent.verified && (
+        {/* stamp — native agents get the house mark instead of the generic one */}
+        {agent.native ? (
+          <div className="absolute top-3 right-3 -rotate-[4deg] px-1.5 py-0.5 border-[1.5px]" style={{ borderColor: "var(--ak-ink)", background: "var(--ak-signal)", color: "var(--ak-ink)", fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 2 }}>
+            STATION ISSUE
+          </div>
+        ) : agent.verified ? (
           <div className="absolute top-3 right-3 -rotate-[4deg] opacity-70 px-1.5 py-0.5 border-[1.5px]" style={{ borderColor: "var(--ak-stamp)", color: "var(--ak-stamp)", fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 2 }}>
             ACTIVE
           </div>
-        )}
+        ) : null}
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 1.5, color: "var(--ak-ink3)" }}>
           {formatCat(agent.category).toUpperCase()}
         </div>
@@ -226,6 +231,11 @@ export function LandingClient({ agents, totalCount, totalOps, faqs }: Props) {
   const [mode, setMode] = useState<"grid" | "list">("grid");
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
+  // Agents the marketplace hosts itself. Section /02 below is an additional
+  // highlight — it does NOT remove them from the full roster in /03, which is
+  // still every active agent, ranked, exactly as before.
+  const nativeAgents = agents.filter((a) => a.native);
+
   const formattedOps = totalOps >= 1_000_000
     ? `${(totalOps / 1_000_000).toFixed(1)}M`
     : totalOps >= 1_000 ? `${(totalOps / 1_000).toFixed(0)}K` : String(totalOps);
@@ -305,11 +315,42 @@ export function LandingClient({ agents, totalCount, totalOps, faqs }: Props) {
         </div>
       </section>
 
-      {/* ═══════════ /02 ACTIVE DOSSIERS ═══════════ */}
+      {/* ═══════════ /02 STATION ISSUE ═══════════ */}
+      {nativeAgents.length > 0 && (
+        <section id="station-issue" style={{ ...paperBg, borderBottom: "1px solid var(--ak-rule)" }} className="px-8 sm:px-14 py-24 scroll-mt-12">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-10 gap-6">
+            <div>
+              <div className="mb-2.5" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>/02 · STATION ISSUE</div>
+              <div style={{ fontFamily: "var(--font-heading)", fontSize: "clamp(48px, 6vw, 88px)", lineHeight: 0.92, letterSpacing: -2.4, color: "var(--ak-ink)" }}>
+                Built <span className="italic">in-house.</span>
+              </div>
+              <div className="mt-3.5 max-w-[460px]" style={{ fontFamily: "var(--font-sans)", fontSize: 15, color: "var(--ak-ink2)" }}>
+                Operatives the station hosts and maintains itself. Same API, same ranking, same benchmarks — no third-party provider behind them.
+              </div>
+            </div>
+            <div className="text-right shrink-0" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 1.5, color: "var(--ak-ink3)" }}>
+              <div>ON STATION</div>
+              <div className="mt-1" style={{ fontFamily: "var(--font-heading)", fontSize: 44, lineHeight: 1, letterSpacing: -1.5, color: "var(--ak-ink)" }}>
+                {String(nativeAgents.length).padStart(2, "0")}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {nativeAgents.map((a) => <DossierCard key={a.id} agent={a} />)}
+          </div>
+
+          <div className="mt-8 pt-5 border-t" style={{ borderColor: "var(--ak-rule)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 1.5, color: "var(--ak-ink3)" }}>
+            STATION ISSUE OPERATIVES ALSO APPEAR IN THE FULL ROSTER BELOW
+          </div>
+        </section>
+      )}
+
+      {/* ═══════════ /03 ACTIVE DOSSIERS ═══════════ */}
       <section id="operatives" style={{ ...paperBg, borderBottom: "1px solid var(--ak-rule)" }} className="px-8 sm:px-14 py-24 scroll-mt-12">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-10 gap-6">
           <div>
-            <div className="mb-2.5" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>/02 · ACTIVE DOSSIERS</div>
+            <div className="mb-2.5" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>/03 · ACTIVE DOSSIERS</div>
             <div style={{ fontFamily: "var(--font-heading)", fontSize: "clamp(48px, 6vw, 88px)", lineHeight: 0.92, letterSpacing: -2.4, color: "var(--ak-ink)" }}>
               Top <span className="italic">operatives.</span>
             </div>
@@ -362,7 +403,7 @@ export function LandingClient({ agents, totalCount, totalOps, faqs }: Props) {
       <section style={{ ...paperBg, borderBottom: "1px solid var(--ak-rule)" }} className="px-8 sm:px-14 py-24">
         <div className="grid grid-cols-1 sm:grid-cols-[280px_1fr] gap-14 mb-14">
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>
-            /03 · INTAKE PROCEDURE
+            /04 · INTAKE PROCEDURE
           </div>
           <div>
             <div style={{ fontFamily: "var(--font-heading)", fontSize: "clamp(36px, 4vw, 64px)", lineHeight: 1, letterSpacing: -1.6, color: "var(--ak-ink)" }}>
@@ -384,7 +425,7 @@ export function LandingClient({ agents, totalCount, totalOps, faqs }: Props) {
       {/* ═══════════ /04 RECRUIT (dark classified) ═══════════ */}
       <section style={{ ...classifiedBg, borderBottom: "1px solid #2a2824" }} className="px-8 sm:px-14 py-24 text-[#e8e2d4]">
         <div className="flex justify-between mb-10" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "#8a8478" }}>
-          <span>/04 · RECRUIT</span>
+          <span>/05 · RECRUIT</span>
           <span style={{ color: "var(--ak-signal)" }}>&#9670; PROVIDER CHANNEL</span>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-20 items-start">
@@ -431,7 +472,7 @@ export function LandingClient({ agents, totalCount, totalOps, faqs }: Props) {
       <section style={{ ...paperBg, borderBottom: "1px solid var(--ak-rule)" }} className="px-8 sm:px-14 py-24">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_460px] gap-14 items-center">
           <div>
-            <div className="mb-2.5" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>/05 · INTAKE</div>
+            <div className="mb-2.5" style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2, color: "var(--ak-ink3)" }}>/06 · INTAKE</div>
             <div style={{ fontFamily: "var(--font-heading)", fontSize: "clamp(48px, 6vw, 96px)", lineHeight: 0.92, letterSpacing: -2.8, color: "var(--ak-ink)" }}>
               Start with <span className="italic">one</span><br />
               dispatch.

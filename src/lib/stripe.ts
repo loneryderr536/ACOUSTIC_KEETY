@@ -1,16 +1,6 @@
-import Stripe from 'stripe';
-
-let stripeInstance: Stripe | null = null;
-
-export function getStripe(): Stripe | null {
-  if (stripeInstance) return stripeInstance;
-
-  const key = process.env.STRIPE_SECRET_KEY;
-  if (!key) {
-    console.warn('[stripe] STRIPE_SECRET_KEY not configured');
-    return null;
-  }
-
-  stripeInstance = new Stripe(key);
-  return stripeInstance;
-}
+/**
+ * Compatibility shim. The Stripe client now lives in `src/stripe/client.ts`
+ * along with the rest of the integration; this file stays so existing
+ * `@/lib/stripe` imports keep working. Prefer importing from `@/stripe`.
+ */
+export { getStripe, PAYOUT_CURRENCY } from '@/stripe/client';

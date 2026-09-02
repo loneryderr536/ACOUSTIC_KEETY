@@ -26,6 +26,13 @@ export async function GET(request: NextRequest) {
       where.category = category;
     }
 
+    // ?native=true  -> only agents the marketplace hosts itself
+    // ?native=false -> only third-party listings
+    // omitted       -> everything, as before
+    const nativeParam = url.searchParams.get('native');
+    if (nativeParam === 'true') where.native = true;
+    else if (nativeParam === 'false') where.native = false;
+
     if (q) {
       // Full-text search: GIN index on searchVector accelerates these queries.
       // Individual search terms are matched against tags for better discovery.
@@ -88,6 +95,8 @@ export async function GET(request: NextRequest) {
       totalCalls: a.totalCalls,
       rating: a.rating,
       reviewCount: a.reviewCount,
+      // Hosted by the marketplace itself rather than a third-party provider.
+      native: a.native,
       status: a.status,
       pricePerCall: a.pricePerCall,
       modelTier: a.modelTier,

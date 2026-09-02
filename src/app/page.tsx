@@ -69,6 +69,7 @@ export default async function HomePage() {
     totalCalls: a.totalCalls,
     trendDelta: a.trendDelta ?? 0,
     verified: a.status === "active" && (a.currentScore ?? 0) > 0,
+    native: a.native,
     tags: a.tags,
     uptime: a.uptime ?? 100,
     successRate: a.errorRate != null ? +(100 - a.errorRate).toFixed(1) : 100,
