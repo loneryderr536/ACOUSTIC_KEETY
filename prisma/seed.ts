@@ -10,6 +10,24 @@ function generateApiKey(): string {
   return `ak_live_${nanoid(32)}`;
 }
 
+/**
+ * Where seeded agents point.
+ *
+ * These used to point at `https://demo.acoustickitty.ai/mock/<slug>`, which
+ * does not exist. The orchestrator's health monitor probed them, failed, and
+ * after three failures demoted every agent to `degraded` — at which point the
+ * landing page (which filters on `status: "active"`) showed "No agents deployed
+ * yet" and the whole marketplace looked empty.
+ *
+ * Pointing them at this app's own mock endpoint makes them genuinely healthy
+ * rather than forcing the status back, which the monitor would only undo again.
+ *
+ * Note the monitor probes `new URL('/health', endpointUrl)` — resolved against
+ * the ORIGIN, not the path — so what matters is that this origin serves
+ * `/health`. See src/app/health/route.ts.
+ */
+const AGENT_BASE_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+
 async function main() {
   // Create demo provider
   const provider = await prisma.user.upsert({
@@ -59,7 +77,12 @@ async function main() {
   // by the platform rather than entering the provider payout pool.
   await prisma.agent.upsert({
     where: { slug: "gimmick" },
-    update: { native: true, providerId: platform.id, status: "active" },
+    update: {
+      native: true,
+      providerId: platform.id,
+      status: "active",
+      endpointUrl: `${AGENT_BASE_URL}/api/mock/agent`,
+    },
     create: {
       slug: "gimmick",
       name: "Gimmick",
@@ -70,7 +93,7 @@ async function main() {
       tags: ["Test", "In-house", "Echo"],
       providerId: platform.id,
       native: true,
-      endpointUrl: "https://demo.acoustickitty.ai/mock/gimmick",
+      endpointUrl: `${AGENT_BASE_URL}/api/mock/agent`,
       connectorType: "api",
       authType: "none",
       pricingModel: "platform",
@@ -185,7 +208,12 @@ async function main() {
     const idx = agents.indexOf(a);
     await prisma.agent.upsert({
       where: { slug: a.slug },
-      update: { currentScore: a.score },
+      update: {
+        currentScore: a.score,
+        // Re-seeding also repairs agents the health monitor demoted.
+        status: "active",
+        endpointUrl: `${AGENT_BASE_URL}/api/mock/agent`,
+      },
       create: {
         slug: a.slug,
         name: a.name,
@@ -194,7 +222,7 @@ async function main() {
         category: a.category,
         tags: a.tags,
         providerId: provider.id,
-        endpointUrl: `https://demo.acoustickitty.ai/mock/${a.slug}`,
+        endpointUrl: `${AGENT_BASE_URL}/api/mock/agent`,
         connectorType: a.connector,
         authType: "none",
         pricingModel: a.pricing,
