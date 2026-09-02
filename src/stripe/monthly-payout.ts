@@ -65,8 +65,24 @@ export type MonthlyPayoutSummary = {
   platformRetainedFromNativeCents: number;
   reserveHeldCents: number;
   distributableCents: number;
-  transfers: Array<{ providerId: string; grossAmount: number; transferId: string }>;
-  carriedForward: Array<{ providerId: string; grossAmount: number; weighted: number; sharePct: number }>;
+  transfers: Array<{
+    providerId: string;
+    grossAmount: number;
+    /** Portion of grossAmount that was owed from earlier periods. */
+    carriedInCents: number;
+    transferId: string;
+  }>;
+  carriedForward: Array<{
+    providerId: string;
+    /** What this period alone earned them. */
+    periodShareCents: number;
+    /** What was already owed before this period. */
+    carriedInCents: number;
+    /** Running total now owed — persisted to ProviderBalance. */
+    balanceCents: number;
+    weighted: number;
+    sharePct: number;
+  }>;
   errors: string[];
 };
 
@@ -302,28 +318,40 @@ export async function estimateProviderShare(providerId: string, periodKey: strin
   const split = await computePeriodSplit(periodKey);
   if (!split.ok) {
     return {
-      periodKey, grossCents: 0, shareCents: 0, weighted: 0, sharePct: 0, callCount: 0,
+      periodKey, grossCents: 0, shareCents: 0, carriedInCents: 0, payableCents: 0,
+      weighted: 0, sharePct: 0, callCount: 0,
       currency: PAYOUT_CURRENCY, belowMinimum: false, reason: split.error,
     };
   }
 
   const weighted = split.weightedByProvider[providerId] ?? 0;
   const sharePct = split.thirdPartyWeightedTotal > 0 ? weighted / split.thirdPartyWeightedTotal : 0;
+
+  // Anything still owed from earlier periods counts toward the next payout, so
+  // the dashboard has to show it or a provider sees "below minimum" three
+  // months running with no sense that the total is climbing.
+  const balanceRow = await prisma.providerBalance.findUnique({ where: { providerId } });
+  const carriedInCents =
+    balanceRow && balanceRow.lastPeriodKey === periodKey ? 0 : balanceRow?.pendingCents ?? 0;
   // Gross is this provider's slice of the pool before the reserve is withheld;
   // shareCents is what would actually transfer. Showing both makes the reserve
   // visible to the provider rather than an unexplained shortfall.
   const grossCents = Math.round(sharePct * split.providerPoolCents);
   const shareCents = Math.round(sharePct * split.distributableCents);
 
+  const payableCents = shareCents + carriedInCents;
+
   return {
     periodKey,
     grossCents,
     shareCents,
+    carriedInCents,
+    payableCents,
     weighted,
     sharePct,
     callCount: split.callsByProvider[providerId] ?? 0,
     currency: split.currency,
-    belowMinimum: shareCents > 0 && shareCents < MIN_PAYOUT_THRESHOLD_CENTS,
+    belowMinimum: payableCents > 0 && payableCents < MIN_PAYOUT_THRESHOLD_CENTS,
     reason: undefined as string | undefined,
   };
 }
@@ -420,26 +448,60 @@ export async function runMonthlyPayout(
   // ── Stage 6: pay each third-party provider ──────────────────────────────
   for (const [providerId, weighted] of Object.entries(weightedByProvider)) {
     const sharePct = weighted / thirdPartyWeightedTotal;
-    const grossAmount = Math.round(sharePct * distributableCents);
+    const periodShareCents = Math.round(sharePct * distributableCents);
     const callCount = callsByProvider[providerId] ?? 0;
 
-    if (grossAmount < MIN_PAYOUT_THRESHOLD_CENTS) {
-      summary.carriedForward.push({ providerId, grossAmount, weighted, sharePct });
-      continue;
-    }
+    // What this provider was already owed from periods that fell short of the
+    // minimum. Re-running the same period must not stack its share twice, so a
+    // balance already tagged with this periodKey is treated as containing it.
+    const existing = await prisma.providerBalance.findUnique({ where: { providerId } });
+    const carriedInCents =
+      existing && existing.lastPeriodKey === periodKey
+        ? Math.max(0, existing.pendingCents - periodShareCents)
+        : existing?.pendingCents ?? 0;
+
+    const grossAmount = periodShareCents + carriedInCents;
 
     const provider = await prisma.user.findUnique({
       where: { id: providerId },
       select: { id: true, stripeAccountId: true, chargesEnabled: true, payoutsEnabled: true },
     });
 
-    if (!provider || !provider.stripeAccountId || !provider.chargesEnabled || !provider.payoutsEnabled) {
+    // Pulled out as its own const so the `!destination` check below narrows it
+    // to `string` for stripe.transfers.create. An earlier version tested a
+    // `Boolean(...)` flag instead, which reads the same but narrows nothing —
+    // tsc was right to warn that a null destination could reach Stripe.
+    const destination = provider?.stripeAccountId ?? null;
+    const onboarded = Boolean(
+      destination && provider?.chargesEnabled && provider?.payoutsEnabled,
+    );
+
+    // Below the minimum, or not payout-capable: the money stays owed. Persist
+    // it, so next period adds to it rather than starting from zero.
+    if (grossAmount < MIN_PAYOUT_THRESHOLD_CENTS || !destination || !onboarded) {
+      if (!dryRun) {
+        await prisma.providerBalance.upsert({
+          where: { providerId },
+          update: { pendingCents: grossAmount, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+          create: { providerId, pendingCents: grossAmount, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+        });
+      }
+
       await upsertPayoutRow({
         dryRun, providerId, periodKey, periodStart, periodEnd,
         weightedCalls: weighted, sharePct, grossAmount, callCount,
-        status: 'held_incomplete_onboarding',
+        status: onboarded ? 'carried_forward' : 'held_incomplete_onboarding',
       });
-      summary.errors.push(`Provider ${providerId} not fully onboarded — held, not transferred.`);
+
+      summary.carriedForward.push({
+        providerId, periodShareCents, carriedInCents, balanceCents: grossAmount, weighted, sharePct,
+      });
+
+      if (!onboarded) {
+        summary.errors.push(
+          `Provider ${providerId} not fully onboarded — ${grossAmount}c held and carried forward, not lost.`,
+        );
+      }
       continue;
     }
 
@@ -455,7 +517,7 @@ export async function runMonthlyPayout(
     });
 
     if (dryRun) {
-      summary.transfers.push({ providerId, grossAmount, transferId: '(dry-run — nothing sent)' });
+      summary.transfers.push({ providerId, grossAmount, carriedInCents, transferId: '(dry-run — nothing sent)' });
       continue;
     }
 
@@ -464,9 +526,13 @@ export async function runMonthlyPayout(
         {
           amount: grossAmount,
           currency: PAYOUT_CURRENCY,
-          destination: provider.stripeAccountId,
+          destination,
           description: `Acoustic Kitty payout for ${periodKey}`,
-          metadata: { providerId, periodKey, weightedCalls: String(weighted) },
+          metadata: {
+            providerId, periodKey,
+            weightedCalls: String(weighted),
+            carriedInCents: String(carriedInCents),
+          },
         },
         { idempotencyKey: `payout_${providerId}_${periodKey}` },
       );
@@ -477,7 +543,15 @@ export async function runMonthlyPayout(
         status: 'paid', transferId: transfer.id,
       });
 
-      summary.transfers.push({ providerId, grossAmount, transferId: transfer.id });
+      // Settled — and only now. Zeroing before the transfer confirmed would
+      // erase the debt without paying it.
+      await prisma.providerBalance.upsert({
+        where: { providerId },
+        update: { pendingCents: 0, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+        create: { providerId, pendingCents: 0, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+      });
+
+      summary.transfers.push({ providerId, grossAmount, carriedInCents, transferId: transfer.id });
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'Unknown Stripe error';
       await upsertPayoutRow({
@@ -485,7 +559,17 @@ export async function runMonthlyPayout(
         weightedCalls: weighted, sharePct, grossAmount, callCount,
         status: 'failed', failureReason: reason,
       });
-      summary.errors.push(`Transfer to ${providerId} failed: ${reason}`);
+
+      // The transfer failed, so the money is still owed. Carrying the full
+      // amount forward means a bad month costs the provider a delay, not their
+      // earnings — and the next run simply retries the whole balance.
+      await prisma.providerBalance.upsert({
+        where: { providerId },
+        update: { pendingCents: grossAmount, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+        create: { providerId, pendingCents: grossAmount, currency: PAYOUT_CURRENCY, lastPeriodKey: periodKey },
+      });
+
+      summary.errors.push(`Transfer to ${providerId} failed: ${reason} — ${grossAmount}c carried forward.`);
     }
   }
 

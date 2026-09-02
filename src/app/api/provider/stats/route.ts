@@ -98,20 +98,27 @@ export async function GET(request: NextRequest) {
         pendingGrossCents: estimate.grossCents,
         pendingProviderShareCents: estimate.shareCents,
         reserveWithheldCents: Math.max(0, estimate.grossCents - estimate.shareCents),
+        // Owed from earlier periods that fell short of the minimum. Shown so a
+        // provider under the threshold can see the total climbing rather than
+        // reading "below minimum" three months running and assuming it is lost.
+        carriedInCents: estimate.carriedInCents,
+        payableCents: estimate.payableCents,
         sharePct: estimate.sharePct,
         belowMinimum: estimate.belowMinimum,
         minimumCents: MIN_PAYOUT_THRESHOLD_CENTS,
         // Actually transferred, ever.
         paidToDateCents,
-        lifetimeProviderShareCents: paidToDateCents + estimate.shareCents,
+        lifetimeProviderShareCents: paidToDateCents + estimate.payableCents,
         currency,
         ...(estimate.reason ? { note: estimate.reason } : {}),
         basis:
           'Earnings are a share of subscription revenue for the current month, weighted by your usage and agent ratings. ' +
-          `Payouts transfer once your share reaches the ${formatMoney(MIN_PAYOUT_THRESHOLD_CENTS, currency)} minimum.`,
+          `Payouts transfer once your balance reaches the ${formatMoney(MIN_PAYOUT_THRESHOLD_CENTS, currency)} minimum. ` +
+          'Anything below that carries forward and is added to the next month — it is never forfeited.',
       },
-      // Legacy field kept for existing UI callers — this period's payable share.
-      totalRevenue: estimate.shareCents,
+      // Legacy field kept for existing UI callers — total currently payable,
+      // including anything carried forward from earlier periods.
+      totalRevenue: estimate.payableCents,
     });
   } catch (error) {
     console.error('[GET /api/provider/stats]', error);

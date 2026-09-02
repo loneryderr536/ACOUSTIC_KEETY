@@ -39,6 +39,7 @@ model User {
   reviews            Review[]
   messagingLinks     MessagingLink[]
   payouts            Payout[]
+  balance            ProviderBalance?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 }
@@ -249,6 +250,31 @@ model WebhookEvent {
 
   @@index([type, processedAt])
   @@map("webhook_events")
+}
+
+/// A provider's unpaid balance, carried between payout periods.
+///
+/// Without this, each payout run computed a provider's share from that period
+/// alone. Anyone below the minimum had it "carried forward" into a field of the
+/// run's response and nothing persisted it — so a provider who never cleared
+/// A$50 in a single month was never paid at all, and the money silently
+/// vanished every cycle. Small providers are exactly who would notice.
+///
+/// The balance holds POST-reserve cents, so carrying it forward never
+/// double-deducts the reserve. It is zeroed only when a transfer succeeds; a
+/// failed or held payout leaves the full amount owing, which makes the system
+/// self-healing across a bad month.
+model ProviderBalance {
+  providerId    String   @id
+  provider      User     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  pendingCents  Int      @default(0)
+  currency      String   @default("aud")
+  /// Last period folded into this balance — guards against a re-run of the
+  /// same period adding its share twice.
+  lastPeriodKey String?
+  updatedAt     DateTime @updatedAt
+
+  @@map("provider_balances")
 }
 
 /// Which Stripe invoices have already been folded into a RevenuePeriod.
