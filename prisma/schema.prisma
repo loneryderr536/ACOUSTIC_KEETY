@@ -1,0 +1,195 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String?
+  passwordHash       String?
+  role               String    @default("subscriber") // "subscriber" | "provider" | "admin"
+  apiKey             String?   @unique
+  plan               String    @default("recruit") // "recruit" | "explorer" | "builder" | "scale"
+  callsUsed          Int       @default(0)
+  callsLimit         Int       @default(500)
+  stripeCustomerId   String?
+  stripeAccountId    String?
+  googleId           String?   @unique
+  onboardingComplete Boolean   @default(false)
+  callsBalance       Int       @default(500)
+  dailyAllowance     Int       @default(17)
+  dailyCeiling       Int       @default(34)
+  lastReplenishAt    DateTime  @default(now())
+  agents             Agent[]
+  apiCalls           ApiCall[]
+  sessions           Session[]
+  reviews            Review[]
+  messagingLinks     MessagingLink[]
+  payouts            Payout[]
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expires      DateTime
+}
+
+model Agent {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String   @unique
+  description    String
+  shortDesc      String   @default("")
+  category       String
+  tags           String[]
+  providerId     String
+  provider       User     @relation(fields: [providerId], references: [id])
+  endpointUrl    String
+  connectorType  String   @default("api") // "api" | "git" | "mcp"
+  authType       String   @default("none") // "bearer" | "api_key" | "none"
+  authToken      String?
+  pricingModel   String   @default("platform") // "platform" | "usage" | "subscription" | "hybrid"
+  pricePerCall   Int      @default(20) // hundredths of a cent
+  status         String   @default("pending") // "pending" | "benchmarking" | "active" | "degraded" | "suspended"
+  logoUrl        String?
+  docsUrl        String?
+  repoUrl        String?
+  mcpServerUrl   String?
+  hasAgentCard   Boolean  @default(false)
+  skillsData     Json?
+  modelTier      String   @default("unknown") // "haiku" | "standard" | "premium" | "unknown"
+  depositPaymentIntentId String?
+  depositStatus  String?
+  depositPaidAt  DateTime?
+
+  // Current scores (denormalised for fast reads)
+  currentScore Float?
+  latencyP50   Int?
+  latencyP95   Int?
+  uptime       Float?  @default(100)
+  errorRate    Float?  @default(0)
+  currentRank  Int?
+  trendDelta   Float?  @default(0)
+  totalCalls   Int     @default(0)
+  rating       Float?  @default(0)
+  reviewCount  Int     @default(0)
+
+  benchmarks   Benchmark[]
+  apiCalls     ApiCall[]
+  healthChecks HealthCheck[]
+  reviews      Review[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([category, status])
+  @@index([status, currentScore(sort: Desc)])
+}
+
+model Benchmark {
+  id           String   @id @default(cuid())
+  agentId      String
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runId        String   @unique @default(cuid())
+  score        Float
+  accuracy     Float
+  latencyP50   Int
+  latencyP95   Int
+  errorRate    Float
+  edgeCaseScore Float
+  testSuiteVer String   @default("v1")
+  rawResults   Json?
+  createdAt    DateTime @default(now())
+
+  @@index([agentId, createdAt(sort: Desc)])
+}
+
+model ApiCall {
+  id               String   @id @default(cuid())
+  callId           String   @unique @default(cuid())
+  subscriberId     String
+  subscriber       User     @relation(fields: [subscriberId], references: [id])
+  agentId          String
+  agent            Agent    @relation(fields: [agentId], references: [id])
+  routingStrategy  String
+  latencyMs        Int
+  status           String // "success" | "error" | "timeout"
+  requestSize      Int    @default(0)
+  responseSize     Int    @default(0)
+  // Legacy: agent's declared list price. Retained for backwards compat.
+  // Not used for payout math — see creditsConsumed.
+  costCents        Int    @default(0)
+  // Credits consumed by this call. Snapshotted at call time from the
+  // agent's model tier so later tier changes don't retroactively reprice
+  // past calls. This is the authoritative field for provider payouts.
+  creditsConsumed  Int    @default(0)
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+
+  @@index([subscriberId, createdAt(sort: Desc)])
+  @@index([agentId, createdAt(sort: Desc)])
+}
+
+model HealthCheck {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  status    String // "healthy" | "unhealthy" | "timeout"
+  latencyMs Int?
+  createdAt DateTime @default(now())
+
+  @@index([agentId, createdAt(sort: Desc)])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  rating    Int // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([agentId, userId])
+}
+
+model MessagingLink {
+  id             String   @id @default(cuid())
+  platform       String
+  platformUserId String
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@unique([platform, platformUserId])
+  @@index([userId])
+}
+
+model Payout {
+  id                  String   @id @default(cuid())
+  providerId          String
+  provider            User     @relation(fields: [providerId], references: [id])
+  periodStart         DateTime
+  periodEnd           DateTime
+  grossCents          Int
+  providerShareCents  Int
+  callCount           Int      @default(0)
+  status              String   @default("pending") // "pending" | "paid" | "skipped" | "failed"
+  skipReason          String?
+  stripeTransferId    String?  @unique
+  failureReason       String?
+  createdAt           DateTime @default(now())
+  paidAt              DateTime?
+
+  @@unique([providerId, periodEnd])
+  @@index([providerId, createdAt(sort: Desc)])
+  @@index([status])
+}
