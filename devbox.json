@@ -1,0 +1,98 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": {
+    "nodejs": "22",
+    "postgresql": "16",
+    "redis": "latest",
+    "stripe-cli": "latest",
+    "jq": "latest"
+  },
+  "env": {
+    "PGDATABASE": "agentvault",
+    "REDIS_URL": "redis://localhost:6379",
+    "NEXT_PUBLIC_APP_URL": "http://localhost:3000",
+    "NEXT_TELEMETRY_DISABLED": "1"
+  },
+  "shell": {
+    "init_hook": [
+      "export PROJECT_ROOT=\"${DEVBOX_PROJECT_ROOT:-$(d=\"$PWD\"; while [ \"$d\" != \"/\" ] && [ ! -f \"$d/devbox.json\" ]; do d=$(dirname \"$d\"); done; if [ -f \"$d/devbox.json\" ]; then echo \"$d\"; else echo \"$PWD\"; fi)}\"",
+      "export ENV_FILE=\"$PROJECT_ROOT/.env\"",
+      "export DATABASE_URL=\"postgresql://$(whoami)@localhost/agentvault?host=${PGHOST}&schema=public\"",
+      "if [ ! -f \"$ENV_FILE\" ] && [ -f \"$PROJECT_ROOT/.env.example\" ]; then cp \"$PROJECT_ROOT/.env.example\" \"$ENV_FILE\" && echo \"[devbox] created $ENV_FILE from .env.example\"; fi",
+      "if [ -f \"$ENV_FILE\" ] && ! grep -q '^ENCRYPTION_KEY=.\\{32\\}$' \"$ENV_FILE\"; then KEY=$(head -c 24 /dev/urandom | base64 | tr -d '\\n=+/' | head -c 32); KEY=$(printf '%-32s' \"$KEY\" | tr ' ' 'x'); if grep -q '^ENCRYPTION_KEY=' \"$ENV_FILE\"; then sed \"s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$KEY|\" \"$ENV_FILE\" > \"$ENV_FILE.tmp\" && mv \"$ENV_FILE.tmp\" \"$ENV_FILE\"; else echo \"ENCRYPTION_KEY=$KEY\" >> \"$ENV_FILE\"; fi; echo '[devbox] generated a 32-char ENCRYPTION_KEY'; fi",
+      "if [ -f \"$ENV_FILE\" ] && grep -q '^DATABASE_URL=' \"$ENV_FILE\"; then sed \"s|^DATABASE_URL=.*|DATABASE_URL=$DATABASE_URL|\" \"$ENV_FILE\" > \"$ENV_FILE.tmp\" && mv \"$ENV_FILE.tmp\" \"$ENV_FILE\"; fi",
+      "echo ''",
+      "echo \"Acoustic Kitty — devbox shell\"",
+      "echo \"  root: $PROJECT_ROOT\"",
+      "if [ \"$PROJECT_ROOT\" != \"$PWD\" ]; then echo \"  cwd : $PWD   (scripts still run against root)\"; fi",
+      "echo ''",
+      "echo '  devbox run setup          first time: install, init db, migrate, seed'",
+      "echo '  devbox services up        start postgres + redis (leave running)'",
+      "echo '  devbox run dev            next dev on :3000'",
+      "echo '  devbox run stripe:listen  main webhook    -> /api/stripe/webhook'",
+      "echo '  devbox run stripe:connect connect events  -> /api/stripe/connect-webhook'",
+      "echo '  devbox run where          show every resolved path'",
+      "echo '  devbox run check          typecheck + lint'",
+      "echo ''"
+    ],
+    "scripts": {
+      "where": [
+        "echo \"project root : $PROJECT_ROOT\"",
+        "echo \"cwd          : $PWD\"",
+        "echo \"env file     : $ENV_FILE\"",
+        "echo \"pg data      : $PGDATA\"",
+        "echo \"pg socket    : $PGHOST\"",
+        "echo \"redis port   : ${REDIS_PORT:-6379}\"",
+        "echo \"database url : $DATABASE_URL\"",
+        "echo \"node         : $(node --version)  npm $(npm --version)\"",
+        "echo \"stripe cli   : $(stripe --version 2>/dev/null || echo 'not on PATH')\""
+      ],
+      "setup": [
+        "cd \"$PROJECT_ROOT\"",
+        "echo '--> installing node deps'",
+        "npm install",
+        "echo '--> initialising postgres cluster (skipped if it exists)'",
+        "[ -d \"$PGDATA\" ] || initdb --username=\"$(whoami)\" --auth=trust --encoding=UTF8",
+        "echo '--> starting services'",
+        "devbox services up -b || true",
+        "sleep 3",
+        "echo '--> creating database (skipped if it exists)'",
+        "createdb agentvault 2>/dev/null || echo '    agentvault already exists'",
+        "echo '--> prisma generate + migrate + seed'",
+        "npx prisma generate",
+        "npx prisma migrate dev",
+        "npx prisma db seed",
+        "echo '--> done. demo API keys are printed above.'"
+      ],
+      "dev": ["cd \"$PROJECT_ROOT\"", "npm run dev"],
+      "build": ["cd \"$PROJECT_ROOT\"", "npm run build"],
+      "start": ["cd \"$PROJECT_ROOT\"", "npm run start"],
+      "lint": ["cd \"$PROJECT_ROOT\"", "npm run lint"],
+      "typecheck": ["cd \"$PROJECT_ROOT\"", "npx tsc --noEmit"],
+      "check": ["cd \"$PROJECT_ROOT\"", "npx tsc --noEmit", "npm run lint"],
+      "db:init": [
+        "cd \"$PROJECT_ROOT\"",
+        "[ -d \"$PGDATA\" ] || initdb --username=\"$(whoami)\" --auth=trust --encoding=UTF8",
+        "createdb agentvault 2>/dev/null || echo 'agentvault already exists'"
+      ],
+      "db:migrate": ["cd \"$PROJECT_ROOT\"", "npx prisma migrate dev"],
+      "db:seed": ["cd \"$PROJECT_ROOT\"", "npx prisma db seed"],
+      "db:studio": ["cd \"$PROJECT_ROOT\"", "npx prisma studio"],
+      "db:reset": ["cd \"$PROJECT_ROOT\"", "npx prisma migrate reset --force"],
+      "db:psql": "psql agentvault",
+      "redis:cli": "redis-cli -p ${REDIS_PORT:-6379}",
+      "services:up": "devbox services up",
+      "services:stop": "devbox services stop",
+      "stripe:login": "stripe login",
+      "stripe:listen": "stripe listen --forward-to localhost:3000/api/stripe/webhook",
+      "stripe:connect": "stripe listen --forward-connect-to localhost:3000/api/stripe/connect-webhook",
+      "stripe:status": [
+        "cd \"$PROJECT_ROOT\"",
+        "echo '--- stripe config ---'",
+        "stripe config --list",
+        "echo '--- STRIPE_* keys present in .env (values hidden) ---'",
+        "grep -o '^STRIPE_[A-Z_]*' \"$ENV_FILE\" 2>/dev/null || echo 'no .env'"
+      ]
+    }
+  }
+}

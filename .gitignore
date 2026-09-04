@@ -46,3 +46,7 @@ next-env.d.ts
 *.png
 !/public/*.png
 .playwright-mcp/
+
+# devbox
+.devbox/
+devbox.lock
